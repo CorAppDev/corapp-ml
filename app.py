@@ -57,7 +57,7 @@ def predict():
         'message': message,
         'intent': intent,
         'confidence': round(confidence, 4),
-        'use_fallback': confidence < 0.5
+        'use_fallback': confidence < 0.2
     })
 
 @app.route('/health', methods=['GET'])
