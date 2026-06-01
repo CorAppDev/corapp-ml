@@ -1,43 +1,38 @@
 from flask import Flask, request, jsonify
 import joblib
 import numpy as np
+import os
 
 app = Flask(__name__)
 
-# Cargar modelo
-model = joblib.load('model/intent_classifier.pkl')
+model = None
 
-CONFIDENCE_THRESHOLD = 0.5
+def load_model():
+    global model
+    if model is None:
+        if not os.path.exists('model/intent_classifier.pkl'):
+            import subprocess
+            subprocess.run(['python', 'train.py'], check=True)
+        model = joblib.load('model/intent_classifier.pkl')
+    return model
 
 def get_confidence(text):
-    """Obtiene la intención y confianza del modelo"""
+    clf = load_model()
     text = text.lower().strip()
-    
-    # Predecir intención
-    intent = model.predict([text])[0]
-    
-    # Obtener distancias de decisión (SVM no da probabilidades directas)
-    decision = model.decision_function([text])[0]
-    
-    # Normalizar a confianza entre 0 y 1
+    intent = clf.predict([text])[0]
+    decision = clf.decision_function([text])[0]
     exp_scores = np.exp(decision - np.max(decision))
     confidence = float(np.max(exp_scores) / exp_scores.sum())
-    
     return intent, confidence
 
 @app.route('/predict', methods=['POST'])
 def predict():
     data = request.get_json()
-    
     if not data or 'message' not in data:
         return jsonify({'error': 'Se requiere el campo message'}), 400
-    
     message = data['message']
     intent, confidence = get_confidence(message)
-    
-    # Si la confianza es baja, indicar fallback a OpenAI
-    use_fallback = confidence < CONFIDENCE_THRESHOLD
-    
+    use_fallback = confidence < 0.5
     return jsonify({
         'message': message,
         'intent': intent,
@@ -47,4 +42,7 @@ def predict():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return
+    return jsonify({'status': 'ok'})
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
