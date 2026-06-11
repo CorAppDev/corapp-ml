@@ -376,5 +376,6 @@ def extract_delivery():
 def health():
     return jsonify({'status': 'ok'})
 
-if __name__ == '__main__':
+# v2.1.0 — extractor mejorado con soporte para etiquetas, barrios y fechas largas
+if __name__ == "__main__":
     app.run(debug=True, port=5000)
