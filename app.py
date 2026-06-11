@@ -77,14 +77,43 @@ VALID_LOCATIONS = {
     "soacha": "Soacha",
     "candelaria": "Candelaria",
     "suba": "Suba",
+    # Barrios → Localidad
     "modelia": "Fontibon",
     "capellania": "Fontibon",
     "capellanía": "Fontibon",
     "patio bonito": "Kennedy",
     "ciudad montes": "Puente aranda",
     "tibabuyes": "Suba",
+    "tibabuyes universal": "Suba",
     "pinar": "Suba",
     "porvenir": "Bosa",
+    "bosa piamonte": "Bosa",
+    "bosa libertad": "Bosa",
+    "bosa nueva": "Bosa",
+    "alqueria": "Kennedy",
+    "alquería": "Kennedy",
+    "alqueria de la fragua": "Kennedy",
+    "alquería de la fragua": "Kennedy",
+    "prado veraniego": "Suba",
+    "prado pinzon": "Suba",
+    "prado pinzón": "Suba",
+    "ciudad kennedy": "Kennedy",
+    "cedro": "Engativa",
+    "alamos": "Engativa",
+    "álamos": "Engativa",
+    "portales": "Engativa",
+    "senderos del porvenir": "Bosa",
+    "san agustin": "Kennedy",
+    "san agustín": "Kennedy",
+    "castellon de los condes": "Kennedy",
+    "antiguo country": "Chapinero",
+    "country": "Chapinero",
+    "rosales": "Chapinero",
+    "portal de rosales": "Chapinero",
+    "gran estacion": "Teusaquillo",
+    "gran estación": "Teusaquillo",
+    "bahia solano": "Fontibon",
+    "bahía solano": "Fontibon",
 }
 
 VALID_DAYS = {
@@ -98,16 +127,57 @@ VALID_DAYS = {
     "sábado": "Sabado",
 }
 
-ADDRESS_START = r'(?:calle|cll|cl|carrera|cra|cr|kra|avenida|av|transversal|transv|tranv|tv|diagonal|dg|autopista)'
+NOISE_PATTERNS = [
+    r'[\w\.-]+@[\w\.-]+\.\w+',
+    r'\b3\d{9}\b',
+    r'\b\d{10}\b',
+]
+
+ADDRESS_START = r'(?:calle|cll|cl|carrera|cra|cr|kra|avenida|av|transversal|transv|tranv|tv|diagonal|dg|autopista|ak)'
+
+INDICATION_KEYWORDS = [
+    'apto', 'apartamento', 'apt', 'torre', 'bloque', 'interior', 'int',
+    'piso', 'local', 'oficina', 'conjunto', 'edificio', 'etapa', 'unidad',
+    'porteria', 'portería', 'dejar en', 'entregar en', 'llamar', 'timbrar',
+    'rejas', 'reja', 'esquina', 'frente', 'cerca', 'al lado',
+    'despues', 'después', 'casa azul', 'casa blanca', 'casa roja',
+    'primer piso', 'segundo piso', 'tercer piso', 'si no estoy',
+]
 
 
-def normalize_text(text):
+def normalize_text(text: str) -> str:
     text = text.lower().strip()
     text = unicodedata.normalize("NFD", text)
     return "".join(c for c in text if unicodedata.category(c) != "Mn")
 
 
-def extract_day(text):
+def clean_noise(text: str) -> str:
+    for pattern in NOISE_PATTERNS:
+        text = re.sub(pattern, '', text)
+    return text
+
+
+def extract_labeled_fields(text: str) -> dict:
+    """Extrae campos con etiquetas como Nombre:, Dirección:, Barrio:, etc."""
+    fields = {}
+    label_patterns = {
+        'name': r'(?:nombre(?:\s+completo)?|contacto)\s*[:*]?\s*(.+)',
+        'address': r'(?:direcci[oó]n(?:\s+completa)?|dir)\s*[:*]?\s*(.+)',
+        'indications': r'(?:indicaciones?|detalles?|barrio|referencias?|informaci[oó]n\s+adicional)\s*[:*]?\s*(.+)',
+        'locality': r'(?:localidad(?:\s+de\s+entrega)?)\s*[:*]?\s*(.+)',
+        'day': r'(?:d[ií]a(?:\s+de\s+entrega)?|fecha(?:\s+de\s+entrega)?)\s*[:*]?\s*(.+)',
+    }
+    text_lower = text.lower()
+    for field, pattern in label_patterns.items():
+        match = re.search(pattern, text_lower, re.IGNORECASE | re.MULTILINE)
+        if match:
+            value = match.group(1).strip().split('\n')[0].strip()
+            if value and value.lower() not in ('ninguna', 'ninguno', 'n/a', 'na', '-'):
+                fields[field] = value
+    return fields
+
+
+def extract_day(text: str) -> str | None:
     norm = normalize_text(text)
     for day_key, day_value in VALID_DAYS.items():
         if re.search(r'\b' + normalize_text(day_key) + r'\b', norm):
@@ -115,7 +185,7 @@ def extract_day(text):
     return None
 
 
-def extract_locality(text):
+def extract_locality(text: str) -> str | None:
     norm = normalize_text(text)
     sorted_locs = sorted(VALID_LOCATIONS.items(), key=lambda x: len(x[0]), reverse=True)
     for loc_key, loc_value in sorted_locs:
@@ -125,30 +195,57 @@ def extract_locality(text):
     return None
 
 
-def extract_address_and_indications(text):
-    lines = [l.strip() for l in text.replace(',', '\n').split('\n') if l.strip()]
+def extract_address_line(text: str) -> tuple:
+    """
+    Extrae dirección e indicaciones.
+    Maneja tanto texto multilínea como todo en una línea.
+    """
+    # Preparar líneas
+    lines = []
+    for part in text.replace(',', '\n').split('\n'):
+        part = part.strip()
+        if part:
+            lines.append(part)
+    
     address_line = None
     indication_parts = []
 
     for line in lines:
         norm_line = normalize_text(line)
+        clean_line = clean_noise(line).strip()
+        if not clean_line:
+            continue
+
+        # Si la línea empieza con tipo de vía
         if re.match(ADDRESS_START, norm_line, re.IGNORECASE):
+            # Extraer solo la parte de la dirección
             addr_match = re.match(
                 r'(' + ADDRESS_START + r'\s*[\w\s.\-#bis]+?\d+[\w\s.\-#]*\d*)',
-                line, re.IGNORECASE
+                clean_line, re.IGNORECASE
             )
             if addr_match:
                 address_line = addr_match.group(1).strip()
-                rest = line[len(address_line):].strip().strip(',').strip()
+                rest = clean_line[len(address_line):].strip().strip(',').strip()
                 if rest:
                     indication_parts.append(rest)
             else:
-                address_line = line
-        elif re.search(r'\b(apto|apartamento|torre|bloque|interior|int|piso|local|conjunto|edificio|porteria|portería)\b', norm_line):
-            indication_parts.append(line)
-        elif re.search(r'\b(despues|después|dejar|llamar|tocar|frente|cerca|esquina|rejas|color)\b', norm_line):
-            indication_parts.append(line)
+                address_line = clean_line
+        # Si tiene keywords de indicación
+        elif any(kw in norm_line for kw in INDICATION_KEYWORDS):
+            clean = clean_noise(line).strip()
+            if clean:
+                indication_parts.append(clean)
 
+    # Si no encontramos dirección con líneas, buscar en texto completo
+    if not address_line:
+        match = re.search(
+            r'(' + ADDRESS_START + r'\s*[\w\s.\-#]+?\d+[\w\s.\-#]*\d*)',
+            text, re.IGNORECASE
+        )
+        if match:
+            address_line = match.group(1).strip()
+
+    # Limpiar indicaciones
     seen = set()
     clean_indications = []
     for part in indication_parts:
@@ -161,18 +258,20 @@ def extract_address_and_indications(text):
     return address_line, indications
 
 
-def extract_name(text):
+def extract_name(text: str) -> str | None:
     lines = [l.strip() for l in text.split('\n') if l.strip()]
     day_keywords = '|'.join(normalize_text(d) for d in VALID_DAYS.keys())
     loc_keywords = '|'.join(normalize_text(l) for l in VALID_LOCATIONS.keys())
 
-    for line in lines[:3]:
+    for line in lines[:4]:
         norm = normalize_text(line)
+        clean = clean_noise(line).strip()
         if (re.match(r'^[a-záéíóúñ\s]+$', norm) and
                 len(line.split()) >= 2 and
                 not re.search(r'\b(' + day_keywords + r')\b', norm) and
-                not re.search(r'\b(' + loc_keywords + r')\b', norm)):
-            return line.strip()
+                not re.search(r'\b(' + loc_keywords + r')\b', norm) and
+                not re.search(r'@|\d', line)):
+            return clean
     return None
 
 
@@ -180,20 +279,58 @@ def extract_delivery_info(text, valid_locations=None, valid_days=None, valid_tim
     if not text or not text.strip():
         return {"error": True, "errorMessage": "Mensaje vacío", "info": None}
 
-    address, indications = extract_address_and_indications(text)
-    locality = extract_locality(text)
-    day = extract_day(text)
-    name = extract_name(text)
+    clean_text = clean_noise(text)
+    labeled = extract_labeled_fields(clean_text)
 
-    if not address or not locality or not day:
-        return {"error": True, "errorMessage": "No se pudo extraer la información de entrega", "info": None}
+    name = labeled.get('name') or extract_name(clean_text)
+
+    address = None
+    indications = labeled.get('indications', '')
+
+    if labeled.get('address'):
+        address = labeled['address']
+        if not indications:
+            _, ind = extract_address_line(clean_text)
+            indications = ind
+    else:
+        address, ind = extract_address_line(clean_text)
+        if ind and not indications:
+            indications = ind
+
+    locality = None
+    if labeled.get('locality'):
+        locality = extract_locality(labeled['locality'])
+    if not locality:
+        locality = extract_locality(clean_text)
+
+    day = None
+    if labeled.get('day'):
+        day = extract_day(labeled['day'])
+    if not day:
+        day = extract_day(clean_text)
+
+    # Errores específicos para mejor UX
+    missing = []
+    if not address:
+        missing.append("dirección")
+    if not locality:
+        missing.append("localidad")
+    if not day:
+        missing.append("día de entrega")
+
+    if missing:
+        return {
+            "error": True,
+            "errorMessage": "No se pudo extraer la información de entrega",
+            "info": None,
+        }
 
     return {
         "error": False,
         "errorMessage": None,
         "info": {
             "address": address,
-            "indications": indications,
+            "indications": indications or "",
             "locationDelivery": locality,
             "dayDelivery": day,
             "timeDelivery": "morning",
@@ -202,6 +339,7 @@ def extract_delivery_info(text, valid_locations=None, valid_days=None, valid_tim
             "userName": name,
         }
     }
+
 
 # ============================================================
 # ENDPOINTS
@@ -226,7 +364,6 @@ def extract_delivery():
     data = request.get_json()
     if not data or 'text' not in data:
         return jsonify({'error': True, 'errorMessage': 'Se requiere el campo text', 'info': None}), 400
-    
     result = extract_delivery_info(
         data['text'],
         data.get('validLocations'),
