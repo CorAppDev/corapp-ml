@@ -379,3 +379,137 @@ def health():
 # v2.1.0 — extractor mejorado con soporte para etiquetas, barrios y fechas largas
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
+
+# ============================================================
+# ANÁLISIS DE FALLOS — /analyze-failures
+# ============================================================
+
+KNOWN_LOCATIONS_SET = set(VALID_LOCATIONS.keys())
+
+DAY_SUGGESTIONS = {
+    "manana": "Usuario escribió 'mañana' en lugar del nombre del día",
+    "hoy": "Usuario escribió 'hoy' en lugar del nombre del día",
+    "domingo": "Domingo no es día de entrega disponible",
+    "pasado manana": "Usuario escribió 'pasado mañana' en lugar del nombre del día",
+}
+
+
+def analyze_failures_logic(messages: list) -> list:
+    suggestions = []
+    seen = set()
+
+    for text in messages:
+        if not text or not text.strip():
+            continue
+
+        norm = normalize_text(text)
+        clean_text = clean_noise(text)
+
+        # ✅ Detectar barrios nuevos no reconocidos
+        barrio_patterns = [
+            r'\bbarrio\s+([a-záéíóúñ\s]{3,30})',
+            r'\bsector\s+([a-záéíóúñ\s]{3,30})',
+            r'\burbanizacion\s+([a-záéíóúñ\s]{3,30})',
+        ]
+        for pattern in barrio_patterns:
+            matches = re.findall(pattern, norm)
+            for match in matches:
+                match_clean = match.strip()
+                if match_clean and match_clean not in KNOWN_LOCATIONS_SET:
+                    key = f"loc_{match_clean}"
+                    if key not in seen:
+                        seen.add(key)
+                        suggestions.append({
+                            "type": "new_location",
+                            "value": match_clean,
+                            "suggested_locality": None,
+                            "original_message": text[:120],
+                        })
+
+        # ✅ Detectar días no válidos
+        day_found = extract_day(text)
+        if not day_found:
+            # Palabras como mañana, hoy, domingo
+            for bad_day, suggestion in DAY_SUGGESTIONS.items():
+                if re.search(r'\b' + bad_day + r'\b', norm):
+                    key = f"day_{bad_day}"
+                    if key not in seen:
+                        seen.add(key)
+                        suggestions.append({
+                            "type": "day_format",
+                            "value": bad_day,
+                            "suggestion": suggestion,
+                            "original_message": text[:120],
+                        })
+
+            # Fechas completas como "28 de mayo"
+            date_pattern = r'\b\d{1,2}\s+de\s+(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b'
+            date_match = re.search(date_pattern, norm)
+            if date_match:
+                key = f"date_{date_match.group(0)}"
+                if key not in seen:
+                    seen.add(key)
+                    suggestions.append({
+                        "type": "day_format",
+                        "value": date_match.group(0),
+                        "suggestion": "Usuario envió fecha completa en lugar del nombre del día (ej: Viernes)",
+                        "original_message": text[:120],
+                    })
+
+        # ✅ Detectar si tiene dirección pero no tiene día
+        has_address = bool(re.search(
+            r'(?:calle|carrera|avenida|transversal|diagonal|cra|cl|av|tranv)',
+            norm
+        ))
+        has_locality = extract_locality(text) is not None
+
+        if has_address and has_locality and not day_found:
+            key = f"missing_day_{text[:40]}"
+            if key not in seen:
+                seen.add(key)
+                suggestions.append({
+                    "type": "missing_day",
+                    "value": text[:120],
+                    "suggestion": "Usuario envió dirección y localidad pero olvidó el día de entrega",
+                    "original_message": text[:120],
+                })
+
+        # ✅ Detectar mensajes muy cortos que no aportan datos
+        word_count = len(clean_text.split())
+        if word_count <= 2 and not day_found and not has_address:
+            key = f"short_{text[:20]}"
+            if key not in seen:
+                seen.add(key)
+                suggestions.append({
+                    "type": "incomplete_message",
+                    "value": text[:120],
+                    "suggestion": "Mensaje demasiado corto — usuario posiblemente confundido con el flujo",
+                    "original_message": text[:120],
+                })
+
+    return suggestions
+
+
+@app.route('/analyze-failures', methods=['POST'])
+def analyze_failures():
+    data = request.get_json()
+    if not data or 'messages' not in data:
+        return jsonify({'error': True, 'errorMessage': 'Se requiere el campo messages', 'suggestions': []}), 400
+
+    messages = data['messages']
+    if not isinstance(messages, list):
+        return jsonify({'error': True, 'errorMessage': 'messages debe ser una lista', 'suggestions': []}), 400
+
+    suggestions = analyze_failures_logic(messages)
+
+    return jsonify({
+        'error': False,
+        'errorMessage': None,
+        'analyzed': len(messages),
+        'suggestions': suggestions,
+    })
+
+
+# v2.2.0 — endpoint analyze-failures agregado
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
